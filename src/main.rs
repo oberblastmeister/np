@@ -5,8 +5,7 @@ use regex::Regex;
 use serde::{de, Deserialize, Deserializer};
 use skim::prelude::*;
 use std::ffi::OsStr;
-use std::io::{self, BufRead, BufReader};
-use std::path::PathBuf;
+use std::io::{ BufRead, BufReader};
 use std::process::{self, Command, Stdio};
 use std::{fmt, panic, thread};
 use xshell::{cmd, Shell};
@@ -106,6 +105,20 @@ impl NixProfileLine {
     }
 }
 
+fn get_nix_profile_installed_store_paths(sh: &Shell) -> Result<Vec<String>> {
+    let res = run_skim_items(
+        get_nix_profile_installed(&sh)?
+            .into_iter()
+            .map(|t| t as Arc<dyn SkimItem>)
+            .collect::<Vec<_>>(),
+    )?;
+    let paths = res
+        .iter()
+        .map(|t| t.output().to_string())
+        .collect::<Vec<_>>();
+    Ok(paths)
+}
+
 fn get_nix_profile_installed(sh: &Shell) -> Result<Vec<Arc<NixProfileLine>>> {
     let output = cmd!(sh, "nix profile list").output()?;
     output
@@ -121,17 +134,7 @@ fn get_nix_profile_installed(sh: &Shell) -> Result<Vec<Arc<NixProfileLine>>> {
 impl Remove {
     pub fn run(&self) -> Result<()> {
         let sh = Shell::new()?;
-
-        let res = run_skim_items(
-            get_nix_profile_installed(&sh)?
-                .into_iter()
-                .map(|t| t as Arc<dyn SkimItem>)
-                .collect::<Vec<_>>(),
-        )?;
-        let paths = res
-            .iter()
-            .map(|t| t.output().to_string())
-            .collect::<Vec<_>>();
+        let paths = get_nix_profile_installed_store_paths(&sh)?;
         if paths.is_empty() {
             return Ok(());
         }
@@ -145,6 +148,12 @@ pub struct Upgrade {}
 
 impl Upgrade {
     pub fn run(&self) -> Result<()> {
+        let sh = Shell::new()?;
+        let paths = get_nix_profile_installed_store_paths(&sh)?;
+        if paths.is_empty() {
+            return Ok(());
+        }
+        cmd!(sh, "nix profile upgrade {paths...}").run()?;
         Ok(())
     }
 }
@@ -259,31 +268,6 @@ fn fuzzy_install(flakes: &[String]) -> Result<Vec<Arc<dyn SkimItem>>> {
     })
 }
 
-struct Package<'a> {
-    flake: &'a str,
-    attrpath: &'a str,
-}
-
-impl<'a> Package<'a> {
-    fn parse(s: &str) -> Option<Package<'_>> {
-        static RE: Lazy<Regex> = Lazy::new(|| Regex::new("(?:([^#])#)?(.*)").unwrap());
-        let captures = RE.captures(s)?;
-        let flake = captures.get(1).map(|m| m.as_str()).unwrap_or("nixpkgs");
-        let attrpath = captures.get(2)?.as_str();
-        Some(Package { flake, attrpath })
-    }
-
-    fn installable(&self) -> String {
-        format!("{}#{}", self.flake, self.attrpath)
-    }
-}
-
-fn run_skim_from_read(reader: impl io::BufRead + Send + 'static) -> Result<Vec<Arc<dyn SkimItem>>> {
-    let item_reader = SkimItemReader::new(SkimItemReaderOption::default().nth("2").build());
-    let receiver = item_reader.of_bufread(reader);
-    run_skim(receiver)
-}
-
 fn run_skim_items(items: Vec<Arc<dyn SkimItem>>) -> Result<Vec<Arc<dyn SkimItem>>> {
     let (sender, receiver) = bounded(items.len());
     for item in items {
@@ -295,7 +279,7 @@ fn run_skim_items(items: Vec<Arc<dyn SkimItem>>) -> Result<Vec<Arc<dyn SkimItem>
 
 fn run_skim(receiver: SkimItemReceiver) -> Result<Vec<Arc<dyn SkimItem>>> {
     let options = SkimOptionsBuilder::default()
-        .height(Some("50%"))
+        // .height(Some("50%"))
         .multi(true)
         .build()
         .unwrap();
